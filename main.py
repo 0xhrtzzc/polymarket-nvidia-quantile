@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
-"""Polymarket NVIDIA CEO-forecast entry: pools every market's width-normalised logit moves into one shape, scales it back by each market's own width, and emits five quantiles per market per minute out to a four-hour horizon.
+"""Polymarket NVIDIA CEO-forecast entry: it writes a JSON table holding five probability quantiles (5%, 25%, 50%, 75%, 95%) for every market at every minute up to a four-hour horizon, each one read off a single pooled shape of the markets' width-normalised logit moves stretched back onto that market's own width.
+The band's two tails are scaled apart because each side carries its own multiplier (TAIL_DN below, TAIL_UP above) that ramps up with distance from the median, letting a fit whose data really does have unequal tails report that instead of being forced onto one symmetric number.
+Those two tails of the band are scaled by separate factors, TAIL_DN on the downside and TAIL_UP on the upside, each ramping up with distance from the median, so a fit whose data really does carry unequal tails can report them instead of being forced onto one symmetric number.
 The two tails are scaled differently because each side carries its own multiplier (TAIL_DN, TAIL_UP) ramped up with distance from the median, so a fit that finds the upside and downside tails of unequal size can say so instead of forcing one symmetric factor on both.
+Where a market's conditioned sample holds too few moves to fill a given horizon, that horizon just goes missing from the market's own table, and a market that ends up with no horizon at all falls back to the plain baseline spread.
 """
 import json
 import math
@@ -11,17 +14,18 @@ HORIZON = 240
 EPS = 1e-6
 
 # --- tuned on the practice cases and held-out cuts of the same history ---
-LAM = 0.32
+# this block is the whole set of fitted knobs the table uses, and their values came out of a search run over the practice cases together with held-out cuts of that same history
+LAM = 0.308
 MED = 0.0
-TAIL_UP = 1.17
-TAIL_DN = 1.17
-REG = 0.46
-SHRINK = 0.09
+TAIL_UP = 1.014
+TAIL_DN = 1.014
+REG = 0.407
+SHRINK = 0.061
 DRIFT = 0.0
-POOL = 0.5
-DELTA = 0.79
+POOL = 0.795
+DELTA = 0.481
 DELTA_MIN_SAMPLES = 250
-TAU = 1913.0
+TAU = 1023.0
 DECAY = 1440.0       # weight decay beyond TAU (minutes)
 STRIDE = 3           # sample every N minutes: the 8-second cap is a hard fail
 BASE_SIGMA = 0.0025  # the house baseline's price-space spread per square-root minute
