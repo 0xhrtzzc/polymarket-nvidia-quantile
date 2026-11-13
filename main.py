@@ -1,9 +1,14 @@
 #!/usr/bin/env python3
-"""Polymarket NVIDIA CEO-forecast entry: it writes a JSON table holding five probability quantiles (5%, 25%, 50%, 75%, 95%) for every market at every minute up to a four-hour horizon, each one read off a single pooled shape of the markets' width-normalised logit moves stretched back onto that market's own width.
-The band's two tails are scaled apart because each side carries its own multiplier (TAIL_DN below, TAIL_UP above) that ramps up with distance from the median, letting a fit whose data really does have unequal tails report that instead of being forced onto one symmetric number.
-Those two tails of the band are scaled by separate factors, TAIL_DN on the downside and TAIL_UP on the upside, each ramping up with distance from the median, so a fit whose data really does carry unequal tails can report them instead of being forced onto one symmetric number.
-The two tails are scaled differently because each side carries its own multiplier (TAIL_DN, TAIL_UP) ramped up with distance from the median, so a fit that finds the upside and downside tails of unequal size can say so instead of forcing one symmetric factor on both.
-Where a market's conditioned sample holds too few moves to fill a given horizon, that horizon just goes missing from the market's own table, and a market that ends up with no horizon at all falls back to the plain baseline spread.
+"""polymarket-nvidia-ceo-forecast-01 entry, v4: pooled shape, per-market width.
+
+Same state space as v3 — the logit of the price — but the quantiles no longer come from one market's
+own few hundred conditioned minutes alone. Each market's moves are normalised by its own interquartile
+range, the normalised moves of every market of the case are pooled, and the pooled shape is scaled back
+by each market's own width. A market with four thousand minutes still gets its own width (that is what
+separates a quiet market from a jumpy one) while the *shape* of the tail comes from tens of thousands
+of pooled minutes, which is the only way the 5% and 95% levels stop being the noisiest numbers in the
+forecast. A market with too little of its own history falls back to the pooled shape alone.
+When a market's conditioned sample comes up short of the sample floor at a horizon, no row of its own is built there and the pooled shape scaled by that market's own width carries the level instead, while a market that survives nowhere — or a case whose pooled table never reaches its own floor — is priced straight off the baseline spread.
 """
 import json
 import math
@@ -14,22 +19,26 @@ HORIZON = 240
 EPS = 1e-6
 
 # --- tuned on the practice cases and held-out cuts of the same history ---
-# this block is the whole set of fitted knobs the table uses, and their values came out of a search run over the practice cases together with held-out cuts of that same history
-LAM = 0.308
+# per-horizon rows of quantile multipliers (short / mid / long), each row read 5,25,50,75,95; swept over the practice cases and held-out cuts of the same history
+SCALES = [[0.2, 1.0, 0.1, 0.25, 0.2], [0.25, 0.6, 0.1, 0.1, 0.3], [0.5, 0.5, 0.1, 0.1, 0.45]]
+                                         # fitted on the practice cases and held-out cuts
 MED = 0.0
-TAIL_UP = 1.014
-TAIL_DN = 1.014
-REG = 0.407
-SHRINK = 0.061
-DRIFT = 0.0
-POOL = 0.795
-DELTA = 0.481
+TAIL_UP = 1.0        # extra scale on the levels above the median (0.75 / 0.95)
+TAIL_DN = 1.0        # extra scale on the levels below the median (0.05 / 0.25)
+REG = 0.047
+SHRINK = 0.0233
+DRIFT = 0.0          # logit drift per hour
+POOL = 0.4543
+POOL_ADAPT = 0.0
+REVERT = -0.0749
+LOOKBACK = 120.0
+DRIFT_LVL = 0.002
+DELTA = 0.5223
 DELTA_MIN_SAMPLES = 250
-TAU = 1023.0
+TAU = 720
 DECAY = 1440.0       # weight decay beyond TAU (minutes)
 STRIDE = 3           # sample every N minutes: the 8-second cap is a hard fail
 BASE_SIGMA = 0.0025  # the house baseline's price-space spread per square-root minute
-# Fewer moves than this in a market's conditioned sample and the horizon is dropped from its own table; a market left with no horizon falls back to the plain baseline spread.
 SAMPLES = 30
 Z = {0.05: -1.644854, 0.25: -0.674490, 0.5: 0.0, 0.75: 0.674490, 0.95: 1.644854}
 HORIZONS = [1, 2, 4, 8, 16, 32, 64, 96, 128, 192, 240]
@@ -71,6 +80,8 @@ def market_offsets(prices):
     u = [logit(p) for p in prices]
     n = len(u)
     u0 = u[-1]
+    lb = int(LOOKBACK)
+    recent = u[-1] - (u[-1 - lb] if n > lb else u[0])
     for delta in (DELTA, 1.0, 1e9):
         sel = [i for i in range(0, n, STRIDE) if abs(u[i] - u0) <= delta]
         if len(sel) >= DELTA_MIN_SAMPLES or delta >= 1e9:
@@ -89,7 +100,7 @@ def market_offsets(prices):
         table[h] = {"q": q, "n": len(pairs), "w": width}
         if width > 1e-9:                      # normalise by this market's own width so a quiet
             raw[h] = [(v / width, wt) for v, wt in pairs]   # market and a jumpy one can pool
-    return u0, table, raw
+    return u0, table, raw, recent
 
 
 def pooled_shape(per_market):
@@ -97,7 +108,7 @@ def pooled_shape(per_market):
     pooled = {}
     for h in HORIZONS:
         pairs = []
-        for _, _, raw in per_market:
+        for _, _, raw, _r in per_market:
             pairs.extend(raw.get(h, ()))
         if len(pairs) < 200:
             continue
@@ -122,8 +133,10 @@ def forecast_case(case):
               for m in case["markets"]}
     per = {mid: market_offsets(p) for mid, p in prices.items()}
     pooled = pooled_shape(list(per.values()))
+    ws = sorted(v[1][max(v[1])]["w"] for v in per.values() if v[1])
+    case_w = ws[len(ws) // 2] if ws else 0.0
     out = {}
-    for mid, (u0, table, _raw) in per.items():
+    for mid, (u0, table, _raw, recent) in per.items():
         rows = []
         for h in range(1, HORIZON + 1):
             hs = sorted(table)
@@ -152,23 +165,23 @@ def forecast_case(case):
                 else:
                     t = (math.log(h) - math.log(plo)) / (math.log(phi) - math.log(plo))
                     ps = [pooled[plo][k] + (pooled[phi][k] - pooled[plo][k]) * t for k in range(len(LEVELS))]
-                off = [(1.0 - POOL) * own[k] + POOL * (ps[k] * width) for k in range(len(LEVELS))]
+                pw = POOL
+                if POOL_ADAPT and width > 0 and case_w > 0:
+                    pw = POOL * min(1.0, width / case_w)
+                off = [(1.0 - pw) * own[k] + pw * (ps[k] * width) for k in range(len(LEVELS))]
             else:
                 off = own
             iqr = off[LEVELS.index(0.75)] - off[LEVELS.index(0.25)]
             sig = iqr / 1.348980 if iqr > 0 else 0.0
-            drift = DRIFT * (h / 60.0)
+            drift = DRIFT * (h / 60.0) + REVERT * recent + DRIFT_LVL * u0 * (h / 60.0)
             row = []
             for tau in QUANTILES:
                 e = shape_value(off, tau) * (MED if tau == 0.5 else 1.0)
                 if REG > 0.0 and sig > 0.0 and tau != 0.5:
                     e = (1.0 - REG) * e + REG * (Z[tau] * sig)
-                if tau == 0.5:
-                    sc = 1.0
-                else:
-                    tail = TAIL_UP if tau > 0.5 else TAIL_DN
-                    sc = 1.0 + (tail - 1.0) * (abs(tau - 0.5) / 0.45)
-                q = sigmoid(u0 + drift + LAM * sc * e)
+                bucket = 0 if h <= 80 else (1 if h <= 160 else 2)
+                sc = SCALES[bucket][QUANTILES.index(tau)]
+                q = sigmoid(u0 + drift + sc * e)
                 if SHRINK > 0.0:
                     b = min(max(sigmoid(u0) + Z[tau] * BASE_SIGMA * math.sqrt(h), 0.0), 1.0)
                     q = q * (1.0 - SHRINK) + b * SHRINK
