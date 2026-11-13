@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""polymarket-nvidia-ceo-forecast-01 entry: each market's Yes price 4 hours ahead, five quantiles
+"""polymarket-nvidia-ceo-forecast-01 entry: five quantiles per market per minute, four hours ahead,
 a minute, with the bands read off that market's own conditioned, recency-weighted history.
 
 A price is a bounded probability, so the state space is its logit. The forecast for a market is the
