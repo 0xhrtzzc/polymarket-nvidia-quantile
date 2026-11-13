@@ -1,14 +1,6 @@
 #!/usr/bin/env python3
-"""polymarket-nvidia-ceo-forecast-01 entry, v4: pooled shape, per-market width.
-
-Same state space as v3 — the logit of the price — but the quantiles no longer come from one market's
-own few hundred conditioned minutes alone. Each market's moves are normalised by its own interquartile
-range, the normalised moves of every market of the case are pooled, and the pooled shape is scaled back
-by each market's own width. A market with four thousand minutes still gets its own width (that is what
-separates a quiet market from a jumpy one) while the *shape* of the tail comes from tens of thousands
-of pooled minutes, which is the only way the 5% and 95% levels stop being the noisiest numbers in the
-forecast. A market with too little of its own history falls back to the pooled shape alone.
-The scalar constants below the imports (LAM, REG, SHRINK, POOL and the rest) are the fit of this recipe, searched on the practice cases and on the held-out cuts of the same history.
+"""Polymarket NVIDIA CEO-forecast entry: pools every market's width-normalised logit moves into one shape, scales it back by each market's own width, and emits five quantiles per market per minute out to a four-hour horizon.
+The two tails are scaled differently because each side carries its own multiplier (TAIL_DN, TAIL_UP) ramped up with distance from the median, so a fit that finds the upside and downside tails of unequal size can say so instead of forcing one symmetric factor on both.
 """
 import json
 import math
