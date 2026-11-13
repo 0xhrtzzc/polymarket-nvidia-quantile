@@ -12,6 +12,8 @@ a fat band at exactly the horizon where jumps happen.
 
 The outer levels are regularised toward a scaled normal, because 5% of a few hundred samples is a
 noisy number and the tails are where a wrong band costs most.
+
+The constants directly below are this model's knobs, tuned on the practice cases and held-out cuts of the same history.
 """
 import json
 import math
@@ -32,6 +34,7 @@ TAU = 1913.4461
 DECAY = 1440.0       # weight decay beyond TAU (minutes)
 REG = 0.4587
 BASE_SIGMA = 0.0025  # the house baseline's price-space spread per square-root minute
+# with too few conditioned pairs the extreme levels are just noise, so guess the baseline spread instead
 SAMPLES = 30
 STRIDE = 3          # sample every N minutes: the cap is 8 s a case, and the tail quantiles
                     # barely move when every third minute is used instead of every one
